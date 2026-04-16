@@ -24,7 +24,7 @@ class Settings(BaseSettings):
         -50.0, description="RMS threshold in dBFS to consider a frame silent"
     )
     blank_timeout_s: float = Field(
-        4.0, description="Continuous silence duration to declare BLANK"
+        7.0, description="Continuous silence duration to declare BLANK"
     )
     blank_speech_ratio_threshold: float = Field(
         0.05,

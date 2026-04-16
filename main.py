@@ -23,13 +23,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from config import settings
+from file_analyzer import analyze_file
 from pipeline import CallDecision, CallType, Pipeline
 from publisher import decision_to_dict, send_webhook
 
@@ -59,6 +64,37 @@ app = FastAPI(title="Blank Call & Voicemail Detector", lifespan=lifespan)
 @app.get("/health")
 async def health():
     return {"status": "ok", "active_calls": len(_active)}
+
+
+@app.post("/analyze")
+async def analyze_audio_file(file: UploadFile):
+    """Analyze an uploaded audio file and return BLANK / VOICEMAIL / LIVE."""
+    _ALLOWED = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif", ".caf"}
+    suffix = Path(file.filename or "audio.wav").suffix.lower()
+    if suffix not in _ALLOWED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{suffix}'. Allowed: {', '.join(sorted(_ALLOWED))}",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        decision = analyze_file(tmp_path)
+        return decision_to_dict(decision)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("File analysis error: {}", exc)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+    finally:
+        os.unlink(tmp_path)
 
 
 @app.get("/calls")
@@ -123,6 +159,15 @@ def _build_payload(msg_type: str, decision: CallDecision) -> dict:
     d = decision_to_dict(decision)
     d["type"] = msg_type
     return d
+
+
+# ---------------------------------------------------------------------------
+# Frontend — served last so it never shadows API or WebSocket routes
+# ---------------------------------------------------------------------------
+
+_FRONTEND_DIR = Path(__file__).parent / "frontend"
+if _FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
 
 
 # ---------------------------------------------------------------------------
